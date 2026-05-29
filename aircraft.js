@@ -356,7 +356,8 @@
 
       addProfile(prof, z, xOff, yOff, twistAngle);
     }
-const nPerSection = (nProf + 1) * 2;
+
+    const nPerSection = (nProf + 1) * 2;
     for (let si = 0; si < nSections; si++) {
       const base = si * nPerSection;
       const next = (si + 1) * nPerSection;
@@ -472,7 +473,8 @@ const nPerSection = (nProf + 1) * 2;
       lSp.position.set(xOff, yOff, -sp);
       leftSpoilers.push(lSp);
       wingGroup.add(lSp);
-const rSp = new THREE.Mesh(spGeom, matSp.clone());
+
+      const rSp = new THREE.Mesh(spGeom, matSp.clone());
       rSp.position.set(xOff, yOff, sp);
       rightSpoilers.push(rSp);
       wingGroup.add(rSp);
