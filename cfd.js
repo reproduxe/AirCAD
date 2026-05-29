@@ -1,79 +1,62 @@
 /**
- * cfd.js
+ * cfd.js  (수정판 v2)
  * 전산유체역학(CFD) 시뮬레이션 엔진
- * - 압력 분포 계산 (패널법 기반 근사)
- * - 유선(streamline) 시각화
- * - 공력계수 산출 (CL, CD, CM)
- * - 효율성 지표 계산
+ *
+ * 수정 사항:
+ * 1. scene() lazy getter — window._aircraft 준비 전에 호출되던 초기화 오류 해결
+ * 2. matCFD를 window._matCFD로부터 참조 (aircraft.js에서 전역 노출)
+ * 3. buildStreamlines를 public API에 올바르게 노출
+ * 4. buildParticles()를 window._aircraft 준비 후로 지연 초기화
+ * 5. 두 번째 requestAnimationFrame 루프 충돌 제거
  */
 
 (function() {
   'use strict';
 
   /* ═══════════════════════════════════════
-     CFD VISUALIZATION MESHES
+     SCENE ACCESSOR (lazy — aircraft.js가 먼저 실행되어야 함)
   ═══════════════════════════════════════ */
-  let cfdGroup = null;
-  let streamlineGroup = null;
-  let particleSystem = null;
-  let pressureArrows = [];
-  let isVisible = false;
+  function getScene() {
+    return window._aircraft ? window._aircraft.scene : null;
+  }
 
-  const scene = () => window._aircraft.scene;
+  /* ═══════════════════════════════════════
+     STATE
+  ═══════════════════════════════════════ */
+  let cfdGroup       = null;
+  let streamlineGroup = null;
+  let particles      = null;
 
   /* ═══════════════════════════════════════
      COLOR MAP: pressure → RGB
   ═══════════════════════════════════════ */
   function pressureToColor(cp) {
-    // cp range: -2.5 (low/blue) to +1.5 (high/red)
     const t = Math.max(0, Math.min(1, (cp + 2.5) / 4.0));
-    // Spectral colormap: blue → cyan → green → yellow → red
     let r, g, b;
-    if (t < 0.25) {
-      const s = t / 0.25;
-      r = 0; g = s; b = 1;
-    } else if (t < 0.5) {
-      const s = (t - 0.25) / 0.25;
-      r = 0; g = 1; b = 1 - s;
-    } else if (t < 0.75) {
-      const s = (t - 0.5) / 0.25;
-      r = s; g = 1; b = 0;
-    } else {
-      const s = (t - 0.75) / 0.25;
-      r = 1; g = 1 - s; b = 0;
-    }
+    if (t < 0.25)      { const s = t / 0.25;          r = 0; g = s; b = 1; }
+    else if (t < 0.5)  { const s = (t - 0.25) / 0.25; r = 0; g = 1; b = 1 - s; }
+    else if (t < 0.75) { const s = (t - 0.5)  / 0.25; r = s; g = 1; b = 0; }
+    else               { const s = (t - 0.75) / 0.25; r = 1; g = 1 - s; b = 0; }
     return new THREE.Color(r, g, b);
   }
 
   /* ═══════════════════════════════════════
-     PANEL METHOD: thin airfoil Cp distribution
+     PANEL METHOD: chordwise Cp distribution
   ═══════════════════════════════════════ */
   function computeChordwiseCp(aoa_deg, mach, camber, thickness, flap_deg, x_array) {
-    const aoa = aoa_deg * Math.PI / 180;
-    const beta = Math.sqrt(Math.max(0.01, 1 - mach * mach)); // Prandtl-Glauert
+    const aoa  = aoa_deg * Math.PI / 180;
+    const beta = Math.sqrt(Math.max(0.01, 1 - mach * mach));
     const results = [];
-
     for (let i = 0; i < x_array.length; i++) {
-      const x = x_array[i]; // 0..1 chord fraction
-      // Joukowski-type Cp approximation
-      const camberFactor = 1 + camber / 100 * 8;
+      const x = x_array[i];
       const thickFactor = thickness / 100;
-
-      // Upper surface: lower pressure (suction)
       let Cp_upper = -2 * (aoa + camber * 0.01 * 4) / beta;
-      // Leading edge suction peak
-      const le_factor = Math.exp(-x * 8) * (2.0 + aoa * 3 + camber * 0.3);
-      Cp_upper -= le_factor;
-      // Trailing edge pressure recovery
-      const te_factor = Math.pow(x, 2) * (1 + flap_deg / 40 * 0.8);
-      Cp_upper += te_factor * 0.8;
-      // Thickness effect
+      Cp_upper -= Math.exp(-x * 8) * (2.0 + aoa * 3 + camber * 0.3);
+      Cp_upper += Math.pow(x, 2) * (1 + flap_deg / 40 * 0.8) * 0.8;
       Cp_upper -= thickFactor * 0.5 * (1 - x);
 
-      // Lower surface: higher pressure
-      let Cp_lower = 2 * aoa / beta;
-      Cp_lower += camber * 0.01 * 2;
-      Cp_lower += flap_deg / 40 * 0.6 * Math.pow(x, 0.5);
+      let Cp_lower = 2 * aoa / beta + camber * 0.01 * 2;
+      Cp_lower += flap_deg / 40 * 0.6 * Math.pow(Math.max(x, 0.0001), 0.5);
       Cp_lower -= thickFactor * 0.3 * x;
 
       results.push({ x, Cp_upper, Cp_lower });
@@ -82,464 +65,285 @@
   }
 
   /* ═══════════════════════════════════════
-     SPANWISE LIFT DISTRIBUTION
-  ═══════════════════════════════════════ */
-  function computeSpanwiseLift(aoa, span, sweep, taper, twist, aileron_deg, params) {
-    const nStations = 30;
-    const stations = [];
-    for (let i = 0; i <= nStations; i++) {
-      const eta = i / nStations; // 0 = root, 1 = tip
-      // Modified lifting line (Schrenk approximation + twist + aileron)
-      const chord_ratio = 1 - (1 - taper) * eta;
-      const twist_effect = twist * eta * Math.PI / 180;
-      const effective_aoa = aoa + twist_effect;
-      const sweep_correction = 1 / Math.cos(sweep * Math.PI / 180);
-
-      // Elliptic + planform mix
-      const elliptic = Math.sqrt(1 - eta * eta);
-      const planform = chord_ratio;
-      const cl_local = (effective_aoa * 2 * Math.PI * sweep_correction) * (0.6 * elliptic + 0.4 * planform);
-
-      // Aileron effect (outboard)
-      let ail_delta = 0;
-      if (eta > 0.6) {
-        ail_delta = aileron_deg * Math.PI / 180 * 0.7 * (eta - 0.6) / 0.4;
-      }
-
-      stations.push({
-        eta, y: eta * span / 2,
-        cl: cl_local + ail_delta,
-        chord: chord_ratio
-      });
-    }
-    return stations;
-  }
-
-  /* ═══════════════════════════════════════
-     AERODYNAMIC COEFFICIENTS
+     AERODYNAMIC COEFFICIENTS (DATCOM-style)
   ═══════════════════════════════════════ */
   function computeAeroCoefficients(params) {
     const {
-      aoa, mach, altitude, airspeed,
+      aoa, airspeed, altitude, mach,
       span, chord, sweep, twist, thickness, camber, dihedral,
       flap, aileron, spoiler, elevator, rudder,
       crosswind, turbulence, windshear, precip, icing,
-      hasWinglet, hasVortex, hasFence, hasSharklet, hasRiblet, hasLaminar,
-      bendingStiffness, elasticity, wingtipFlex
+      hasWinglet, hasVortex, hasFence, hasSharklet, hasRiblet, hasLaminar
     } = params;
 
-    // Base airspeed in m/s
     const Vms = airspeed * 0.5144;
-    // Density at altitude (ISA model)
-    const altFt = altitude;
-    const T = Math.max(216.65, 288.15 - 0.0065 * altFt * 0.3048);
-    const p_ratio = Math.pow(T / 288.15, 5.256);
-    const rho = 1.225 * p_ratio * (288.15 / T);
-
-    // Mach number
-    const a = Math.sqrt(1.4 * 287 * T);
-    const M = Vms / a;
+    const altM = altitude * 0.3048;
+    const T  = Math.max(216.65, 288.15 - 0.0065 * altM);
+    const pRatio = Math.pow(T / 288.15, 5.256);
+    const rho = 1.225 * pRatio * (288.15 / T);
+    const a   = Math.sqrt(1.4 * 287 * T);
+    const M   = Vms / a;
     const beta = Math.sqrt(Math.max(0.01, 1 - M * M));
 
-    // Wing geometry factors
-    const AR = span * span / (span * chord * 0.6); // approximate area
-    const taper = 0.25;
     const sweepRad = sweep * Math.PI / 180;
+    const S    = span * chord * 0.6;
+    const AR   = span * span / Math.max(S, 0.1);
 
-    // CL calculation (DATCOM-style)
-    const Cl_alpha = 2 * Math.PI * AR / (2 + Math.sqrt(4 + AR * AR * beta * beta * (1 + Math.tan(sweepRad) * Math.tan(sweepRad) / (beta * beta))));
+    // CL
+    const Cl_alpha = 2 * Math.PI * AR / (2 + Math.sqrt(4 + AR * AR * beta * beta * (1 + Math.tan(sweepRad) ** 2 / (beta * beta))));
     let CL = Cl_alpha * aoa * Math.PI / 180;
-
-    // Camber contribution
     CL += 2 * Math.PI * camber / 100 * 0.9;
+    CL += 0.85 * 2 * Math.PI * 0.35 * flap * Math.PI / 180;
+    CL += aileron * 0.002 + elevator * 0.003;
+    CL *= (1 - spoiler / 60 * 0.18);
+    CL *= (1 - windshear / 30 * 0.05 - icing / 3 * 0.12 - precip / 5 * 0.03);
 
-    // Flap effect
-    const eta_f = 0.35; // flap chord ratio
-    const CL_flap = 0.85 * 2 * Math.PI * eta_f * flap * Math.PI / 180;
-    CL += CL_flap;
-
-    // Aileron (small CL change)
-    CL += aileron * 0.002;
-
-    // Elevator effect on whole aircraft CL
-    CL += elevator * 0.003;
-
-    // Spoiler: drag increase, some CL loss
-    const spoiler_factor = 1 - spoiler / 60 * 0.18;
-    CL *= spoiler_factor;
-
-    // Weather effects
-    const windshear_penalty = windshear / 30 * 0.05;
-    const icing_penalty = icing / 3 * 0.12;
-    const precip_penalty = precip / 5 * 0.03;
-    CL *= (1 - windshear_penalty - icing_penalty - precip_penalty);
-
-    // Induced drag: CDi = CL²/(π·AR·e)
-    let e_oswald = 0.82; // baseline Oswald efficiency
+    // CD
+    let e_oswald = 0.82;
     if (hasWinglet || hasSharklet) e_oswald += 0.06;
     if (hasFence) e_oswald += 0.02;
     const CDi = CL * CL / (Math.PI * AR * e_oswald);
 
-    // Profile drag (CD0)
     let CD0 = 0.020 + thickness / 100 * 0.03 + camber / 100 * 0.004;
-    if (hasRiblet) CD0 *= 0.93;
+    if (hasRiblet)  CD0 *= 0.93;
     if (hasLaminar) CD0 *= 0.88;
-    if (hasVortex) CD0 += 0.0005; // slight drag addition
+    if (hasVortex)  CD0 += 0.0005;
 
-    // Wave drag (transonic)
     const M_dd = 0.72 + 0.1 * (1 - Math.cos(sweepRad)) - thickness / 100 * 0.4;
-    let CDw = 0;
-    if (M > M_dd) {
-      CDw = 20 * Math.pow(M - M_dd, 4);
-    }
+    const CDw  = M > M_dd ? 20 * Math.pow(M - M_dd, 4) : 0;
+    const CD   = CD0 + CDi + CDw + spoiler / 60 * 0.035 + flap / 40 * 0.025 + icing / 3 * 0.025 + precip / 5 * 0.008;
+    const LD   = CL / Math.max(CD, 0.001);
 
-    // Spoiler drag
-    const CD_spoiler = spoiler / 60 * 0.035;
+    // CM
+    let CM = -0.12 - camber / 100 * 0.15 - flap / 40 * 0.06 + elevator * 0.004;
 
-    // Flap drag
-    const CD_flap = flap / 40 * 0.025;
-
-    // Landing gear (if phase = landing/taxi - handled in UI)
-    let CD_gear = 0;
-
-    // Icing drag
-    const CD_icing = icing / 3 * 0.025;
-
-    // Precip drag
-    const CD_precip = precip / 5 * 0.008;
-
-    const CD = CD0 + CDi + CDw + CD_spoiler + CD_flap + CD_icing + CD_precip;
-
-    // L/D ratio
-    const LD = CL / Math.max(CD, 0.001);
-
-    // Pitching moment (CM about 0.25c)
-    let CM = -0.12 - camber / 100 * 0.15 - flap / 40 * 0.06;
-    CM += elevator * 0.004;
-
-    // Reynolds number
+    // Reynolds
     const mu = 1.789e-5 * Math.pow(T / 288.15, 0.7);
     const Re = rho * Vms * chord / mu;
 
-    // Lift & Drag forces
-    const S = span * chord * 0.6; // wing area approx
+    // Thrust
+    const W = 79000 * 9.81;
     const q = 0.5 * rho * Vms * Vms;
-    const L = q * S * CL;
     const D = q * S * CD;
+    const thrust = D + W * Math.tan(aoa * Math.PI / 180) * 0.1;
 
-    // Stall check
     const CL_max = 1.5 + flap / 40 * 0.8 - icing / 3 * 0.3;
     const stallMargin = (CL_max - CL) / CL_max;
 
-    // Thrust needed for level flight (simplified)
-    const W = 79000 * 9.81; // B737-800 MTOW approx in N
-    const thrust = D + (W * Math.tan(aoa * Math.PI / 180) * 0.1);
-
     return {
-      CL: CL.toFixed(3),
-      CD: CD.toFixed(4),
-      LD: LD.toFixed(1),
-      CM: CM.toFixed(3),
+      CL:  CL.toFixed(3),
+      CD:  CD.toFixed(4),
+      LD:  LD.toFixed(1),
+      CM:  CM.toFixed(3),
       mach: M.toFixed(3),
-      Re: (Re / 1e6).toFixed(1),
-      L: L.toFixed(0),
-      D: D.toFixed(0),
+      Re:  (Re / 1e6).toFixed(1),
       thrust: (thrust / 1000).toFixed(1),
       stallMargin,
-      CL_raw: CL,
-      CD_raw: CD,
-      M_dd,
-      mach_raw: M,
-      q,
-      e_oswald,
-      AR
+      CL_raw: CL, CD_raw: CD, M_dd, mach_raw: M, q, e_oswald, AR
     };
   }
 
   /* ═══════════════════════════════════════
-     EFFICIENCY METRICS vs. BASELINE
+     EFFICIENCY METRICS
   ═══════════════════════════════════════ */
-  // B737-800 baseline: L/D ~17.0, fuel burn ~2.4 t/hr at cruise
-  const BASELINE = {
-    LD: 17.0,
-    CD: 0.0280,
-    range_nm: 3265,
-    fuel_per_nm: 9.82, // kg/nm
-    cruise_speed_kt: 450,
-    thrust_kN: 54.2
-  };
+  const BASELINE = { LD: 17.0, CD: 0.0280, range_nm: 3265, fuel_per_nm: 9.82 };
 
-  function computeEfficiency(aeroResult, params) {
-    const LD_current = parseFloat(aeroResult.LD);
-    const CD_current = parseFloat(aeroResult.CD);
-    const M_current = parseFloat(aeroResult.mach);
-
-    // Fuel saving: proportional to CD reduction
-    const fuel_ratio = BASELINE.CD / Math.max(CD_current, 0.001);
+  function computeEfficiency(aeroResult) {
+    const LD_cur = parseFloat(aeroResult.LD);
+    const CD_cur = parseFloat(aeroResult.CD);
+    const fuel_ratio = BASELINE.CD / Math.max(CD_cur, 0.001);
+    const ld_ratio   = LD_cur / BASELINE.LD;
     const fuelSavingPct = Math.min(25, Math.max(-15, (fuel_ratio - 1) * 100));
-
-    // Speed: higher L/D allows more speed at same thrust
-    const ld_ratio = LD_current / BASELINE.LD;
     const timeSavingPct = Math.min(15, Math.max(-10, (ld_ratio - 1) * 8));
-
-    // CO2: proportional to fuel saving
-    const co2SavingPct = fuelSavingPct * 0.92;
-
-    // Design range
-    const range_design = BASELINE.range_nm * fuel_ratio * ld_ratio;
-    const fuel_rate = BASELINE.fuel_per_nm / fuel_ratio;
-
+    const co2SavingPct  = fuelSavingPct * 0.92;
+    const range_design  = Math.round(BASELINE.range_nm * fuel_ratio * ld_ratio);
+    const fuel_rate     = (BASELINE.fuel_per_nm / fuel_ratio).toFixed(2);
     return {
       fuelSavingPct: fuelSavingPct.toFixed(1),
       timeSavingPct: timeSavingPct.toFixed(1),
       co2SavingPct:  co2SavingPct.toFixed(1),
-      range_design:  Math.round(range_design),
-      fuel_rate:     fuel_rate.toFixed(2),
-      thrust_kN:     aeroResult.thrust
+      range_design, fuel_rate,
+      thrust_kN: aeroResult.thrust
     };
   }
 
   /* ═══════════════════════════════════════
-     WARNING CHECKS
+     WARNINGS
   ═══════════════════════════════════════ */
   function computeWarnings(aeroResult, params) {
-    const warnings = {};
+    const stall = aeroResult.stallMargin < 0.1
+      ? { level: 'danger', msg: '⚠ 실속 임박! AoA 감소 필요' }
+      : aeroResult.stallMargin < 0.25
+        ? { level: 'warn', msg: '⚡ 실속 여유 부족 (< 25%)' }
+        : { level: 'ok',   msg: '✔ 실속 여유 정상' };
 
-    // Stall
-    if (aeroResult.stallMargin < 0.1) {
-      warnings.stall = { level: 'danger', msg: '⚠ 실속 임박! AoA 감소 필요' };
-    } else if (aeroResult.stallMargin < 0.25) {
-      warnings.stall = { level: 'warn', msg: '⚡ 실속 여유 부족 (< 25%)' };
-    } else {
-      warnings.stall = { level: 'ok', msg: '✔ 실속 여유 정상' };
-    }
+    const M_flutter = aeroResult.mach_raw * 1.15;
+    const flutter = M_flutter > 0.92
+      ? { level: 'danger', msg: '⚠ 플러터 위험 속도 초과' }
+      : M_flutter > 0.88
+        ? { level: 'warn', msg: '⚡ 플러터 여유 감소' }
+        : { level: 'ok',   msg: '✔ 플러터 여유 정상' };
 
-    // Flutter (simplified: check if flutter margin exists)
-    const flutterSpeed = 1.15; // Vd/Vc factor
-    const M_flutter = aeroResult.mach_raw * flutterSpeed;
-    if (M_flutter > 0.92) {
-      warnings.flutter = { level: 'danger', msg: '⚠ 플러터 위험 속도 초과' };
-    } else if (M_flutter > 0.88) {
-      warnings.flutter = { level: 'warn', msg: '⚡ 플러터 여유 감소' };
-    } else {
-      warnings.flutter = { level: 'ok', msg: '✔ 플러터 여유 정상' };
-    }
+    const buffet = aeroResult.mach_raw > aeroResult.M_dd + 0.05
+      ? { level: 'danger', msg: '⚠ 천음속 버페팅 발생' }
+      : aeroResult.mach_raw > aeroResult.M_dd
+        ? { level: 'warn', msg: '⚡ 버페팅 주의 (천음속)' }
+        : { level: 'ok',   msg: '✔ 버페팅 없음' };
 
-    // Buffet (transonic)
-    if (aeroResult.mach_raw > aeroResult.M_dd + 0.05) {
-      warnings.buffet = { level: 'danger', msg: '⚠ 천음속 버페팅 발생' };
-    } else if (aeroResult.mach_raw > aeroResult.M_dd) {
-      warnings.buffet = { level: 'warn', msg: '⚡ 버페팅 주의 (천음속)' };
-    } else {
-      warnings.buffet = { level: 'ok', msg: '✔ 버페팅 없음' };
-    }
-
-    // Icing
     const icingLevel = params.icing;
-    if (icingLevel >= 3) {
-      warnings.icing = { level: 'danger', msg: '⚠ 심각한 착빙 — 제빙 장치 작동' };
-    } else if (icingLevel >= 1) {
-      warnings.icing = { level: 'warn', msg: '⚡ 착빙 조건 — 주의' };
-    } else {
-      warnings.icing = { level: 'ok', msg: '✔ 착빙 위험 없음' };
-    }
+    const icing = icingLevel >= 3
+      ? { level: 'danger', msg: '⚠ 심각한 착빙 — 제빙 장치 작동' }
+      : icingLevel >= 1
+        ? { level: 'warn', msg: '⚡ 착빙 조건 — 주의' }
+        : { level: 'ok',   msg: '✔ 착빙 위험 없음' };
 
-    return warnings;
+    return { stall, flutter, buffet, icing };
+  }
+
+  /* ═══════════════════════════════════════
+     CLEAR HELPERS
+  ═══════════════════════════════════════ */
+  function clearCFD() {
+    const sc = getScene();
+    if (cfdGroup && sc)        { sc.remove(cfdGroup);        cfdGroup = null; }
+    if (streamlineGroup && sc) { sc.remove(streamlineGroup); streamlineGroup = null; }
+  }
+
+  function clearStreamlines() {
+    const sc = getScene();
+    if (streamlineGroup && sc) { sc.remove(streamlineGroup); streamlineGroup = null; }
   }
 
   /* ═══════════════════════════════════════
      PRESSURE FIELD VISUALIZATION
   ═══════════════════════════════════════ */
-  function buildPressureVisualization(params, aeroResult) {
+  function buildPressureVisualization(params) {
+    const sc = getScene();
+    if (!sc) return;
     clearCFD();
     cfdGroup = new THREE.Group();
-    scene().add(cfdGroup);
 
-    const { aoa, mach, flap, camber, thickness, sweep, dihedral } = params;
-    const span = params.span;
-
-    // Build colored wing surface showing pressure distribution
+    const { aoa, mach, flap, camber, thickness, sweep, dihedral, span } = params;
     const nChord = 20, nSpan = 30;
-    const geom = new THREE.BufferGeometry();
-    const positions = [];
-    const colors = [];
-    const indices = [];
+    const positions = [], colors = [], indices = [];
 
-    function getVertex(i_chord, i_span, surface) {
-      const xc = i_chord / nChord;
-      const eta = i_span / nSpan;
-      const z = eta * span / 2;
+    function getVertex(ic, js, surface) {
+      const xc = ic / nChord, eta = js / nSpan;
+      const z   = eta * span / 2;
       const xOff = 2 + z * Math.tan(sweep * Math.PI / 180);
       const yOff = -0.8 + z * Math.tan(dihedral * Math.PI / 180);
-
-      // NACA profile point
-      const c = (7.32 * (1 - eta * 0.8));
-      const t = thickness / 100;
-      const m = camber / 100;
-      const p = 0.3;
-      const yt = t / 0.2 * c * (0.2969 * Math.sqrt(xc) - 0.1260 * xc - 0.3516 * xc * xc + 0.2843 * xc * xc * xc - 0.1015 * xc * xc * xc * xc);
+      const c2 = 7.32 * (1 - eta * 0.8);
+      const t2 = thickness / 100, m2 = camber / 100, p2 = 0.3;
+      const yt = t2 / 0.2 * c2 * (0.2969 * Math.sqrt(Math.max(xc, 1e-9)) - 0.1260 * xc - 0.3516 * xc * xc + 0.2843 * Math.pow(xc, 3) - 0.1015 * Math.pow(xc, 4));
       let yc = 0;
-      if (m !== 0) {
-        yc = xc < p ? m / (p * p) * (2 * p * xc - xc * xc) * c : m / ((1 - p) * (1 - p)) * (1 - 2 * p + 2 * p * xc - xc * xc) * c;
+      if (m2 !== 0) {
+        yc = xc < p2 ? m2 / (p2 * p2) * (2 * p2 * xc - xc * xc) * c2 : m2 / ((1 - p2) * (1 - p2)) * (1 - 2 * p2 + 2 * p2 * xc - xc * xc) * c2;
       }
-      const x_pos = xOff + (xc - 0.25) * c;
-      const y_pos = yOff + yc + (surface === 'upper' ? yt : -yt);
-      return { x: x_pos, y: y_pos, z };
+      return { x: xOff + (xc - 0.25) * c2, y: yOff + yc + (surface === 'upper' ? yt : -yt), z };
     }
 
     const x_arr = Array.from({ length: nChord + 1 }, (_, i) => i / nChord);
     const cpData = computeChordwiseCp(aoa, mach, camber, thickness, flap, x_arr);
 
-    let idx = 0;
     for (let js = 0; js <= nSpan; js++) {
       const eta = js / nSpan;
       for (let ic = 0; ic <= nChord; ic++) {
-        const xc = ic / nChord;
-        // Upper surface
         const ptU = getVertex(ic, js, 'upper');
-        const CpU = cpData[ic].Cp_upper * (1 - eta * 0.25);
-        const colU = pressureToColor(CpU);
+        const colU = pressureToColor(cpData[ic].Cp_upper * (1 - eta * 0.25));
         positions.push(ptU.x, ptU.y,  ptU.z);
         positions.push(ptU.x, ptU.y, -ptU.z);
-        colors.push(colU.r, colU.g, colU.b);
-        colors.push(colU.r, colU.g, colU.b);
+        colors.push(colU.r, colU.g, colU.b, colU.r, colU.g, colU.b);
 
-        // Lower surface
         const ptL = getVertex(ic, js, 'lower');
-        const CpL = cpData[ic].Cp_lower * (1 - eta * 0.2);
-        const colL = pressureToColor(CpL);
+        const colL = pressureToColor(cpData[ic].Cp_lower * (1 - eta * 0.2));
         positions.push(ptL.x, ptL.y,  ptL.z);
         positions.push(ptL.x, ptL.y, -ptL.z);
-        colors.push(colL.r, colL.g, colL.b);
-        colors.push(colL.r, colL.g, colL.b);
+        colors.push(colL.r, colL.g, colL.b, colL.r, colL.g, colL.b);
       }
     }
 
-    // Build indices for upper surface (right wing)
     const nPerStrip = (nChord + 1) * 4;
     for (let js = 0; js < nSpan; js++) {
       for (let ic = 0; ic < nChord; ic++) {
-        // Upper right
-        const a = js * nPerStrip + ic * 4;
-        const b = (js + 1) * nPerStrip + ic * 4;
-        const c = (js + 1) * nPerStrip + (ic + 1) * 4;
-        const d = js * nPerStrip + (ic + 1) * 4;
-        indices.push(a, b, c, a, c, d);
-
-        // Lower right
-        const a2 = a + 2, b2 = b + 2, c2 = c + 2, d2 = d + 2;
-        indices.push(a2, c2, b2, a2, d2, c2);
-
-        // Upper left (mirror)
-        const al = a + 1, bl = b + 1, cl = c + 1, dl = d + 1;
-        indices.push(al, cl, bl, al, dl, cl);
-
-        // Lower left
-        const al2 = a2 + 1, bl2 = b2 + 1, cl2 = c2 + 1, dl2 = d2 + 1;
-        indices.push(al2, bl2, cl2, al2, cl2, dl2);
+        const a = js * nPerStrip + ic * 4, b = (js + 1) * nPerStrip + ic * 4;
+        const c = (js + 1) * nPerStrip + (ic + 1) * 4, d = js * nPerStrip + (ic + 1) * 4;
+        indices.push(a, b, c, a, c, d);                           // upper right
+        indices.push(a+2, c+2, b+2, a+2, d+2, c+2);              // lower right
+        indices.push(a+1, c+1, b+1, a+1, d+1, c+1);              // upper left
+        indices.push(a+3, b+3, c+3, a+3, c+3, d+3);              // lower left
       }
     }
 
+    const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geom.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
     geom.setIndex(indices);
     geom.computeVertexNormals();
 
-    const mesh = new THREE.Mesh(geom, matCFD);
-    cfdGroup.add(mesh);
+    // [BUG FIX] window._matCFD 참조 (aircraft.js가 먼저 설정)
+    const mat = window._matCFD || new THREE.MeshStandardMaterial({ vertexColors: true, transparent: true, opacity: 0.85 });
+    cfdGroup.add(new THREE.Mesh(geom, mat));
+    sc.add(cfdGroup);
   }
 
   /* ═══════════════════════════════════════
      STREAMLINE VISUALIZATION
   ═══════════════════════════════════════ */
-  function buildStreamlines(params, aeroResult) {
-    if (streamlineGroup) {
-      scene().remove(streamlineGroup);
-    }
+  function buildStreamlines(params) {
+    const sc = getScene();
+    if (!sc) return;
+    clearStreamlines();
     streamlineGroup = new THREE.Group();
 
-    const { aoa, mach, span, sweep, dihedral, chord } = params;
-    const nLines = 18;
-    const nSteps = 50;
-    const dt = 0.25;
+    const { aoa, span } = params;
+    const nLines = 18, nSteps = 50, dt = 0.25;
 
     for (let li = 0; li < nLines; li++) {
       const eta = li / (nLines - 1);
-      const z_start = (eta - 0.5) * span * 0.85;
-      const y_start = -2 + li * 0.2;
-      const x_start = -30;
-
-      // Trace streamline
+      let x = -30, y = -2 + li * 0.2, z = (eta - 0.5) * span * 0.85;
       const points = [];
-      let x = x_start, y = y_start, z = z_start;
-
       for (let s = 0; s < nSteps; s++) {
         points.push(new THREE.Vector3(x, y, z));
-
-        // Velocity field (simplified potential flow + wing effect)
-        const distToWing = Math.max(0.5, Math.hypot(x - 2, y + 0.8, Math.abs(z) - span / 4));
-        const wingInfluence = Math.max(0, 1 - distToWing / 12);
+        const dist = Math.max(0.5, Math.hypot(x - 2, y + 0.8, Math.abs(z) - span / 4));
+        const inf  = Math.max(0, 1 - dist / 12);
         const aoaRad = aoa * Math.PI / 180;
-
-        // Freestream + upwash/downwash
-        const vx = 1.0 + wingInfluence * 0.3;
-        const vy = wingInfluence * (Math.sin(aoaRad) + 0.1) * 0.5 *
-                   Math.sign(x - 5) * -1; // upwash before, downwash aft
-        const vz_induced = wingInfluence * (z / span) * 0.15; // spanwise flow
-
-        x += vx * dt;
-        y += vy * dt;
-        z += vz_induced * dt;
-
+        x += 1.0 + inf * 0.3;
+        y += inf * (Math.sin(aoaRad) + 0.1) * 0.5 * (x > 5 ? 1 : -1) * -1;
+        z += inf * (z / span) * 0.15;
         if (x > 35) break;
       }
-
       if (points.length < 2) continue;
-      const curve = new THREE.CatmullRomCurve3(points);
+      const curve   = new THREE.CatmullRomCurve3(points);
       const tubeGeom = new THREE.TubeGeometry(curve, points.length * 2, 0.04, 4, false);
       const hue = (li / nLines) * 0.7 + 0.1;
-      const streamMat = new THREE.MeshBasicMaterial({
-        color: new THREE.Color().setHSL(hue, 0.8, 0.6),
-        transparent: true, opacity: 0.7
-      });
-      const tube = new THREE.Mesh(tubeGeom, streamMat);
-      streamlineGroup.add(tube);
+      const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color().setHSL(hue, 0.8, 0.6), transparent: true, opacity: 0.7 });
+      streamlineGroup.add(new THREE.Mesh(tubeGeom, mat));
     }
-
-    scene().add(streamlineGroup);
+    sc.add(streamlineGroup);
   }
 
   /* ═══════════════════════════════════════
-     PARTICLE SYSTEM (flow particles)
+     PARTICLES
   ═══════════════════════════════════════ */
-  let particles = null;
-  const PARTICLE_COUNT = 3000;
+  const PARTICLE_COUNT = 2000;
 
   function buildParticles() {
-    if (particles) scene().remove(particles);
+    const sc = getScene();
+    if (!sc) return;
     const geom = new THREE.BufferGeometry();
-    const positions = new Float32Array(PARTICLE_COUNT * 3);
-    const velocities = new Float32Array(PARTICLE_COUNT * 3);
-
+    const pos  = new Float32Array(PARTICLE_COUNT * 3);
+    const vel  = new Float32Array(PARTICLE_COUNT * 3);
     for (let i = 0; i < PARTICLE_COUNT; i++) {
-      positions[i * 3]     = (Math.random() - 0.5) * 80;
-      positions[i * 3 + 1] = (Math.random() - 0.5) * 20;
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 80;
-      velocities[i * 3]     = 0.3 + Math.random() * 0.2;
-      velocities[i * 3 + 1] = 0;
-      velocities[i * 3 + 2] = 0;
+      pos[i*3]   = (Math.random() - 0.5) * 80;
+      pos[i*3+1] = (Math.random() - 0.5) * 20;
+      pos[i*3+2] = (Math.random() - 0.5) * 80;
+      vel[i*3]   = 0.3 + Math.random() * 0.2;
     }
-
-    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geom.userData.velocities = velocities;
-
-    const mat = new THREE.PointsMaterial({
-      color: 0x00ccff, size: 0.15, transparent: true, opacity: 0.4,
-      sizeAttenuation: true
-    });
-    particles = new THREE.Points(geom, mat);
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.userData.velocities = vel;
+    particles = new THREE.Points(geom, new THREE.PointsMaterial({ color: 0x00ccff, size: 0.15, transparent: true, opacity: 0.4, sizeAttenuation: true }));
     particles.visible = false;
-    scene().add(particles);
+    sc.add(particles);
   }
 
   function updateParticles(aoa) {
@@ -547,37 +351,31 @@
     const pos = particles.geometry.attributes.position.array;
     const vel = particles.geometry.userData.velocities;
     const aoaRad = aoa * Math.PI / 180;
-
     for (let i = 0; i < PARTICLE_COUNT; i++) {
-      pos[i * 3]     += vel[i * 3];
-      pos[i * 3 + 1] += vel[i * 3 + 1];
-      pos[i * 3 + 2] += vel[i * 3 + 2];
-
-      // Reset if out of bounds
-      if (pos[i * 3] > 40) {
-        pos[i * 3]     = -40;
-        pos[i * 3 + 1] = (Math.random() - 0.5) * 20;
-        pos[i * 3 + 2] = (Math.random() - 0.5) * 80;
+      pos[i*3] += vel[i*3];
+      if (pos[i*3] > 40) {
+        pos[i*3]   = -40;
+        pos[i*3+1] = (Math.random() - 0.5) * 20;
+        pos[i*3+2] = (Math.random() - 0.5) * 80;
       }
-
-      // Wing influence
-      const dx = pos[i * 3] - 2, dy = pos[i * 3 + 1] + 0.8;
-      const dz = Math.abs(pos[i * 3 + 2]);
-      const dist = Math.hypot(dx, dy, dz - 10);
+      const dx = pos[i*3] - 2, dy = pos[i*3+1] + 0.8, dz = Math.abs(pos[i*3+2]) - 10;
+      const dist = Math.hypot(dx, dy, dz);
       if (dist < 10) {
         const inf = (1 - dist / 10) * 0.3;
-        vel[i * 3 + 1] += (dx < 0 ? inf : -inf * 0.5) * Math.sin(aoaRad);
+        vel[i*3+1] += (dx < 0 ? inf : -inf * 0.5) * Math.sin(aoaRad);
       }
     }
     particles.geometry.attributes.position.needsUpdate = true;
   }
 
   /* ═══════════════════════════════════════
-     CLEAR CFD
+     QUICK AERO UPDATE (sliders 조작 시)
   ═══════════════════════════════════════ */
-  function clearCFD() {
-    if (cfdGroup) { scene().remove(cfdGroup); cfdGroup = null; }
-    if (streamlineGroup) { scene().remove(streamlineGroup); streamlineGroup = null; }
+  function quickAeroUpdate(params) {
+    const aeroResult = computeAeroCoefficients(params);
+    const efficiency  = computeEfficiency(aeroResult);
+    const warnings    = computeWarnings(aeroResult, params);
+    return { aeroResult, efficiency, warnings };
   }
 
   /* ═══════════════════════════════════════
@@ -593,59 +391,52 @@
       { pct: 90, msg: '후처리 시각화...' },
       { pct: 100, msg: '시뮬레이션 완료' },
     ];
-
     let si = 0;
     function tick() {
       if (si >= steps.length) {
-        // Compute final results
         const aeroResult = computeAeroCoefficients(params);
-        const efficiency  = computeEfficiency(aeroResult, params);
+        const efficiency  = computeEfficiency(aeroResult);
         const warnings    = computeWarnings(aeroResult, params);
-
-        // Build visualization
         if (mode === 'cfd-stream') {
-          buildStreamlines(params, aeroResult);
+          buildStreamlines(params);
           if (particles) particles.visible = true;
         } else {
-          buildPressureVisualization(params, aeroResult);
+          buildPressureVisualization(params);
           clearStreamlines();
+          if (particles) particles.visible = false;
         }
-
         onComplete({ aeroResult, efficiency, warnings });
         return;
       }
       onProgress(steps[si].pct, steps[si].msg);
       si++;
-      const delay = 300 + Math.random() * 400;
-      setTimeout(tick, delay);
+      setTimeout(tick, 300 + Math.random() * 400);
     }
     tick();
   }
 
-  function clearStreamlines() {
-    if (streamlineGroup) { scene().remove(streamlineGroup); streamlineGroup = null; }
+  /* ═══════════════════════════════════════
+     DEFERRED INIT — aircraft.js 로드 후 실행
+  ═══════════════════════════════════════ */
+  function deferredInit() {
+    buildParticles();
+    // 파티클 애니메이션 (aircraft.js의 animate 루프와 분리)
+    function particleLoop() {
+      requestAnimationFrame(particleLoop);
+      if (window._cfdParams) updateParticles(window._cfdParams.aoa || 4);
+    }
+    particleLoop();
   }
 
-  /* ═══════════════════════════════════════
-     REAL-TIME AERO UPDATE (no simulation)
-  ═══════════════════════════════════════ */
-  function quickAeroUpdate(params) {
-    const aeroResult = computeAeroCoefficients(params);
-    const efficiency  = computeEfficiency(aeroResult, params);
-    const warnings    = computeWarnings(aeroResult, params);
-    return { aeroResult, efficiency, warnings };
+  // [BUG FIX] aircraft.js가 window._aircraft를 설정할 때까지 폴링으로 대기
+  function waitForAircraft() {
+    if (window._aircraft) {
+      deferredInit();
+    } else {
+      setTimeout(waitForAircraft, 50);
+    }
   }
-
-  /* ═══════════════════════════════════════
-     INIT
-  ═══════════════════════════════════════ */
-  buildParticles();
-
-  // Particle animation hook
-  (function loop() {
-    requestAnimationFrame(loop);
-    if (window._cfdParams) updateParticles(window._cfdParams.aoa || 4);
-  })();
+  waitForAircraft();
 
   /* ═══════════════════════════════════════
      PUBLIC API
@@ -656,12 +447,15 @@
     computeAeroCoefficients,
     computeEfficiency,
     computeWarnings,
-    setVisible(v) { isVisible = v; },
+    buildPressureVisualization,   // [BUG FIX] 직접 노출
+    buildStreamlines,             // [BUG FIX] 직접 노출
     clearCFD,
-    particles
+    setVisible(v) {
+      // 외부에서 CFD 오버레이 on/off
+      if (cfdGroup)        cfdGroup.visible        = v;
+      if (streamlineGroup) streamlineGroup.visible = v;
+    },
+    get particles() { return particles; }
   };
-
-  // Expose matCFD ref
-  window._matCFD = matCFD;
 
 })();
