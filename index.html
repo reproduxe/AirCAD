@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AeroSim CFD — B737 Wing Design Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- HEADER -->
+  <header class="top-bar">
+    <div class="logo">
+      <span class="logo-icon">✈</span>
+      <span class="logo-text">AERO<strong>SIM</strong> CFD</span>
+      <span class="logo-sub">B737-800 Wing Design Studio</span>
+    </div>
+    <div class="header-controls">
+      <button id="btn-reset-view" class="hdr-btn">⟳ 뷰 초기화</button>
+      <button id="btn-toggle-cfd" class="hdr-btn active">🌊 CFD 시각화</button>
+      <button id="btn-export" class="hdr-btn accent">📊 보고서 내보내기</button>
+    </div>
+    <div class="sim-status">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text">시뮬레이션 대기</span>
+    </div>
+  </header>
+
+  <!-- MAIN LAYOUT -->
+  <div class="app-layout">
+
+    <!-- LEFT PANEL: Wing Geometry Controls -->
+    <aside class="panel panel-left" id="panel-left">
+      <div class="panel-title">🛠 날개 형상 설계</div>
+
+      <section class="ctrl-section">
+        <div class="section-label">날개 기본 형상</div>
+        <div class="ctrl-row">
+          <label>익현 길이 (m)<span class="val" id="val-chord">3.5</span></label>
+          <input type="range" id="chord" min="2.5" max="5.0" step="0.1" value="3.5">
+        </div>
+        <div class="ctrl-row">
+          <label>날개 스팬 (m)<span class="val" id="val-span">34.3</span></label>
+          <input type="range" id="span" min="20" max="50" step="0.5" value="34.3">
+        </div>
+        <div class="ctrl-row">
+          <label>후퇴각 (°)<span class="val" id="val-sweep">25</span></label>
+          <input type="range" id="sweep" min="0" max="45" step="1" value="25">
+        </div>
+        <div class="ctrl-row">
+          <label>비틀림각 (°)<span class="val" id="val-twist">-3</span></label>
+          <input type="range" id="twist" min="-8" max="0" step="0.5" value="-3">
+        </div>
+        <div class="ctrl-row">
+          <label>두께비 (%)<span class="val" id="val-thickness">12</span></label>
+          <input type="range" id="thickness" min="8" max="18" step="0.5" value="12">
+        </div>
+        <div class="ctrl-row">
+          <label>상반각 (°)<span class="val" id="val-dihedral">6</span></label>
+          <input type="range" id="dihedral" min="0" max="12" step="0.5" value="6">
+        </div>
+        <div class="ctrl-row">
+          <label>캠버 (%)<span class="val" id="val-camber">2.5</span></label>
+          <input type="range" id="camber" min="0" max="6" step="0.1" value="2.5">
+        </div>
+      </section>
+
+      <section class="ctrl-section">
+        <div class="section-label">날개 굽힘 / 탄성</div>
+        <div class="ctrl-row">
+          <label>굽힘 강성 (EI)<span class="val" id="val-bending">100</span>%</label>
+          <input type="range" id="bending" min="50" max="200" step="5" value="100">
+        </div>
+        <div class="ctrl-row">
+          <label>탄성 계수<span class="val" id="val-elasticity">100</span>%</label>
+          <input type="range" id="elasticity" min="50" max="200" step="5" value="100">
+        </div>
+        <div class="ctrl-row">
+          <label>날개 끝 휨량 (m)<span class="val" id="val-wingtip-flex">0.0</span></label>
+          <input type="range" id="wingtip-flex" min="-2" max="3" step="0.1" value="0">
+        </div>
+      </section>
+
+      <section class="ctrl-section">
+        <div class="section-label">추가 부품 장착</div>
+        <div class="addon-grid">
+          <label class="addon-toggle">
+            <input type="checkbox" id="addon-winglet" checked>
+            <span>윙렛</span>
+          </label>
+          <label class="addon-toggle">
+            <input type="checkbox" id="addon-vortex">
+            <span>와류 발생기</span>
+          </label>
+          <label class="addon-toggle">
+            <input type="checkbox" id="addon-fence">
+            <span>윙 펜스</span>
+          </label>
+          <label class="addon-toggle">
+            <input type="checkbox" id="addon-sharklet">
+            <span>샤클렛</span>
+          </label>
+          <label class="addon-toggle">
+            <input type="checkbox" id="addon-riblet">
+            <span>리블렛 코팅</span>
+          </label>
+          <label class="addon-toggle">
+            <input type="checkbox" id="addon-laminar">
+            <span>층류 제어</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="ctrl-section">
+        <div class="section-label">조종면 편향각</div>
+        <div class="ctrl-row">
+          <label>플랩 (°)<span class="val" id="val-flap">0</span></label>
+          <input type="range" id="flap" min="0" max="40" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>에일러론 (°)<span class="val" id="val-aileron">0</span></label>
+          <input type="range" id="aileron" min="-25" max="25" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>스포일러 (°)<span class="val" id="val-spoiler">0</span></label>
+          <input type="range" id="spoiler" min="0" max="60" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>엘리베이터 (°)<span class="val" id="val-elevator">0</span></label>
+          <input type="range" id="elevator" min="-25" max="25" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>러더 (°)<span class="val" id="val-rudder">0</span></label>
+          <input type="range" id="rudder" min="-30" max="30" step="1" value="0">
+        </div>
+      </section>
+    </aside>
+
+    <!-- CENTER: Three.js Viewport -->
+    <main class="viewport-wrapper">
+      <canvas id="three-canvas"></canvas>
+
+      <!-- CFD overlay legend -->
+      <div class="cfd-legend" id="cfd-legend">
+        <div class="legend-title">압력 분포 (Cp)</div>
+        <div class="legend-bar">
+          <div class="legend-gradient"></div>
+          <div class="legend-labels">
+            <span>+1.5 (고압)</span>
+            <span>0.0</span>
+            <span>-2.0 (저압)</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Viewport toolbar -->
+      <div class="viewport-toolbar">
+        <button class="vp-btn" id="view-front" title="정면">前</button>
+        <button class="vp-btn" id="view-top" title="상면">上</button>
+        <button class="vp-btn" id="view-side" title="측면">側</button>
+        <button class="vp-btn" id="view-iso" title="등각">等</button>
+        <div class="vp-sep"></div>
+        <button class="vp-btn" id="view-wire" title="와이어프레임">⬡</button>
+        <button class="vp-btn" id="view-solid" title="솔리드">⬟</button>
+        <button class="vp-btn" id="view-cfd-pressure" title="압력장">⊕P</button>
+        <button class="vp-btn" id="view-cfd-stream" title="유선">〜V</button>
+      </div>
+
+      <!-- Flight phase indicator -->
+      <div class="flight-phase-bar">
+        <button class="phase-btn" data-phase="taxi">지상 활주</button>
+        <button class="phase-btn active" data-phase="cruise">순항</button>
+        <button class="phase-btn" data-phase="takeoff">이륙</button>
+        <button class="phase-btn" data-phase="landing">착륙</button>
+      </div>
+    </main>
+
+    <!-- RIGHT PANEL: Weather + Efficiency -->
+    <aside class="panel panel-right" id="panel-right">
+
+      <div class="panel-title">🌤 기상 조건</div>
+      <section class="ctrl-section">
+        <div class="ctrl-row">
+          <label>비행 고도 (ft)<span class="val" id="val-altitude">35000</span></label>
+          <input type="range" id="altitude" min="0" max="43000" step="500" value="35000">
+        </div>
+        <div class="ctrl-row">
+          <label>비행 속도 (kt)<span class="val" id="val-airspeed">450</span></label>
+          <input type="range" id="airspeed" min="100" max="600" step="5" value="450">
+        </div>
+        <div class="ctrl-row">
+          <label>받음각 AoA (°)<span class="val" id="val-aoa">4</span></label>
+          <input type="range" id="aoa" min="-5" max="20" step="0.5" value="4">
+        </div>
+        <div class="ctrl-row">
+          <label>측풍 속도 (kt)<span class="val" id="val-crosswind">0</span></label>
+          <input type="range" id="crosswind" min="0" max="50" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>난기류 강도<span class="val" id="val-turbulence">0</span></label>
+          <input type="range" id="turbulence" min="0" max="5" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>윈드시어 (kt/1000ft)<span class="val" id="val-windshear">0</span></label>
+          <input type="range" id="windshear" min="0" max="30" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>기온 편차 (°C)<span class="val" id="val-temp-dev">0</span></label>
+          <input type="range" id="temp-dev" min="-20" max="30" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>강수 강도<span class="val" id="val-precip">0</span></label>
+          <input type="range" id="precip" min="0" max="5" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>착빙 조건<span class="val" id="val-icing">0</span></label>
+          <input type="range" id="icing" min="0" max="3" step="1" value="0">
+        </div>
+      </section>
+
+      <div class="panel-title">📈 실시간 공력 분석</div>
+      <section class="aero-readout">
+        <div class="readout-grid">
+          <div class="readout-card">
+            <div class="readout-label">양력계수 CL</div>
+            <div class="readout-value" id="rd-cl">0.482</div>
+          </div>
+          <div class="readout-card">
+            <div class="readout-label">항력계수 CD</div>
+            <div class="readout-value" id="rd-cd">0.0280</div>
+          </div>
+          <div class="readout-card">
+            <div class="readout-label">양항비 L/D</div>
+            <div class="readout-value highlight" id="rd-ld">17.2</div>
+          </div>
+          <div class="readout-card">
+            <div class="readout-label">피칭 모멘트</div>
+            <div class="readout-value" id="rd-cm">-0.082</div>
+          </div>
+          <div class="readout-card">
+            <div class="readout-label">마하수</div>
+            <div class="readout-value" id="rd-mach">0.785</div>
+          </div>
+          <div class="readout-card">
+            <div class="readout-label">레이놀즈수(×10⁶)</div>
+            <div class="readout-value" id="rd-re">28.4</div>
+          </div>
+        </div>
+      </section>
+
+      <div class="panel-title">♻ 효율성 지표</div>
+      <section class="efficiency-section">
+        <div class="eff-compare-block">
+          <div class="eff-label">기준 대비 연료 절감</div>
+          <div class="eff-bar-wrap">
+            <div class="eff-bar-bg">
+              <div class="eff-bar-fill fuel" id="bar-fuel"></div>
+            </div>
+            <div class="eff-value" id="val-fuel-saving">0.0%</div>
+          </div>
+        </div>
+        <div class="eff-compare-block">
+          <div class="eff-label">비행 시간 단축</div>
+          <div class="eff-bar-wrap">
+            <div class="eff-bar-bg">
+              <div class="eff-bar-fill time" id="bar-time"></div>
+            </div>
+            <div class="eff-value" id="val-time-saving">0.0%</div>
+          </div>
+        </div>
+        <div class="eff-compare-block">
+          <div class="eff-label">CO₂ 배출 감소</div>
+          <div class="eff-bar-wrap">
+            <div class="eff-bar-bg">
+              <div class="eff-bar-fill co2" id="bar-co2"></div>
+            </div>
+            <div class="eff-value" id="val-co2-saving">0.0%</div>
+          </div>
+        </div>
+
+        <div class="eff-summary">
+          <div class="eff-sum-row">
+            <span>기준 항속거리 (nm)</span><span id="es-range-base">3,265</span>
+          </div>
+          <div class="eff-sum-row">
+            <span>설계 항속거리 (nm)</span><span id="es-range-design" class="accent">3,265</span>
+          </div>
+          <div class="eff-sum-row">
+            <span>연료 소모율 (kg/nm)</span><span id="es-fuel-rate">9.82</span>
+          </div>
+          <div class="eff-sum-row">
+            <span>순항 추력 (kN)</span><span id="es-thrust">54.2</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="panel-title">⚠ 경고 / 알림</div>
+      <section id="warning-panel" class="warning-section">
+        <div class="warn-item ok" id="warn-stall">✔ 실속 여유 정상</div>
+        <div class="warn-item ok" id="warn-flutter">✔ 플러터 여유 정상</div>
+        <div class="warn-item ok" id="warn-buffet">✔ 버페팅 없음</div>
+        <div class="warn-item ok" id="warn-icing">✔ 착빙 위험 없음</div>
+      </section>
+
+      <div class="run-btn-wrap">
+        <button id="btn-run-sim" class="run-btn">
+          <span class="run-icon">▶</span> CFD 시뮬레이션 실행
+        </button>
+        <div class="sim-progress-wrap" id="sim-progress-wrap" style="display:none">
+          <div class="sim-progress-bar" id="sim-progress-bar"></div>
+          <span id="sim-progress-text">초기화 중...</span>
+        </div>
+      </div>
+
+    </aside>
+  </div>
+
+  <!-- REPORT MODAL -->
+  <div class="modal-overlay" id="modal-overlay" style="display:none">
+    <div class="modal-box" id="modal-report">
+      <div class="modal-header">
+        <span>📋 CFD 시뮬레이션 보고서</span>
+        <button id="modal-close">✕</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-footer">
+        <button id="btn-print-report" class="run-btn">🖨 인쇄 / PDF 저장</button>
+        <button id="btn-copy-report" class="hdr-btn">📋 클립보드 복사</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="aircraft.js"></script>
+  <script src="cfd.js"></script>
+  <script src="ui.js"></script>
+</body>
+</html>
