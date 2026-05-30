@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AeroSim CAD — B737 Wing Design Studio</title>
+  <title>AeroSim CFD — B737 Wing Design Studio</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css" />
@@ -30,7 +30,7 @@
   <!-- MAIN LAYOUT -->
   <div class="app-layout">
 
-    <!-- LEFT PANEL: Wing Geometry Controls -->
+    <!-- LEFT PANEL -->
     <aside class="panel panel-left" id="panel-left">
       <div class="panel-title">🛠 날개 형상 설계</div>
 
@@ -112,6 +112,23 @@
         </div>
       </section>
 
+      <!-- ★ 슬랫 + 조종면 통합 섹션 -->
+      <section class="ctrl-section">
+        <div class="section-label">고양력 장치 (앞전)</div>
+        <div class="ctrl-row">
+          <label>슬랫 편향각 (°)<span class="val" id="val-slat">0</span></label>
+          <input type="range" id="slat" min="0" max="27" step="1" value="0">
+        </div>
+        <div class="ctrl-row">
+          <label>슬랫 전개 구간<span class="val" id="val-slat-span">100</span>%</label>
+          <input type="range" id="slat-span" min="30" max="100" step="5" value="100">
+        </div>
+        <div class="ctrl-row">
+          <label>크루거 플랩<span class="val" id="val-krueger">0</span>°</label>
+          <input type="range" id="krueger" min="0" max="90" step="5" value="0">
+        </div>
+      </section>
+
       <section class="ctrl-section">
         <div class="section-label">조종면 편향각</div>
         <div class="ctrl-row">
@@ -141,7 +158,6 @@
     <main class="viewport-wrapper">
       <canvas id="three-canvas"></canvas>
 
-      <!-- CFD overlay legend -->
       <div class="cfd-legend" id="cfd-legend">
         <div class="legend-title">압력 분포 (Cp)</div>
         <div class="legend-bar">
@@ -154,7 +170,6 @@
         </div>
       </div>
 
-      <!-- Viewport toolbar -->
       <div class="viewport-toolbar">
         <button class="vp-btn" id="view-front" title="정면">前</button>
         <button class="vp-btn" id="view-top" title="상면">上</button>
@@ -167,7 +182,6 @@
         <button class="vp-btn" id="view-cfd-stream" title="유선">〜V</button>
       </div>
 
-      <!-- Flight phase indicator -->
       <div class="flight-phase-bar">
         <button class="phase-btn" data-phase="taxi">지상 활주</button>
         <button class="phase-btn active" data-phase="cruise">순항</button>
@@ -176,7 +190,7 @@
       </div>
     </main>
 
-    <!-- RIGHT PANEL: Weather + Efficiency -->
+    <!-- RIGHT PANEL -->
     <aside class="panel panel-right" id="panel-right">
 
       <div class="panel-title">🌤 기상 조건</div>
@@ -249,49 +263,77 @@
         </div>
       </section>
 
+      <!-- ★ Econ Speed 패널 -->
+      <div class="panel-title">⚡ 경제 속도 (Econ Speed)</div>
+      <section class="econ-section">
+        <div class="econ-cost-row">
+          <label class="econ-label">시간 비용 지수 (CI)
+            <span class="econ-hint">0=연료 최소, 100=시간 최소</span>
+          </label>
+          <div class="econ-ci-wrap">
+            <input type="range" id="cost-index" min="0" max="100" step="1" value="30">
+            <span class="val econ-ci-val" id="val-cost-index">30</span>
+          </div>
+        </div>
+        <div class="econ-result-grid">
+          <div class="econ-card accent-card">
+            <div class="econ-card-label">Econ 속도</div>
+            <div class="econ-card-value" id="econ-speed">— kt</div>
+          </div>
+          <div class="econ-card">
+            <div class="econ-card-label">현재 속도</div>
+            <div class="econ-card-value" id="econ-current">450 kt</div>
+          </div>
+          <div class="econ-card">
+            <div class="econ-card-label">속도 편차</div>
+            <div class="econ-card-value" id="econ-delta">— kt</div>
+          </div>
+          <div class="econ-card">
+            <div class="econ-card-label">총 운항 비용</div>
+            <div class="econ-card-value" id="econ-total-cost">— $/hr</div>
+          </div>
+          <div class="econ-card">
+            <div class="econ-card-label">연료 비용</div>
+            <div class="econ-card-value" id="econ-fuel-cost">— $/hr</div>
+          </div>
+          <div class="econ-card">
+            <div class="econ-card-label">시간 비용</div>
+            <div class="econ-card-value" id="econ-time-cost">— $/hr</div>
+          </div>
+        </div>
+        <!-- 비용 곡선 미니 차트 -->
+        <canvas id="econ-chart" width="260" height="110" style="width:100%;margin-top:8px;border-radius:4px;background:var(--bg-card)"></canvas>
+        <div class="econ-chart-label">속도(kt) vs 총 비용($/hr) — ▲ 현재  ★ Econ</div>
+      </section>
+
       <div class="panel-title">♻ 효율성 지표</div>
       <section class="efficiency-section">
         <div class="eff-compare-block">
           <div class="eff-label">기준 대비 연료 절감</div>
           <div class="eff-bar-wrap">
-            <div class="eff-bar-bg">
-              <div class="eff-bar-fill fuel" id="bar-fuel"></div>
-            </div>
+            <div class="eff-bar-bg"><div class="eff-bar-fill fuel" id="bar-fuel"></div></div>
             <div class="eff-value" id="val-fuel-saving">0.0%</div>
           </div>
         </div>
         <div class="eff-compare-block">
           <div class="eff-label">비행 시간 단축</div>
           <div class="eff-bar-wrap">
-            <div class="eff-bar-bg">
-              <div class="eff-bar-fill time" id="bar-time"></div>
-            </div>
+            <div class="eff-bar-bg"><div class="eff-bar-fill time" id="bar-time"></div></div>
             <div class="eff-value" id="val-time-saving">0.0%</div>
           </div>
         </div>
         <div class="eff-compare-block">
           <div class="eff-label">CO₂ 배출 감소</div>
           <div class="eff-bar-wrap">
-            <div class="eff-bar-bg">
-              <div class="eff-bar-fill co2" id="bar-co2"></div>
-            </div>
+            <div class="eff-bar-bg"><div class="eff-bar-fill co2" id="bar-co2"></div></div>
             <div class="eff-value" id="val-co2-saving">0.0%</div>
           </div>
         </div>
-
         <div class="eff-summary">
-          <div class="eff-sum-row">
-            <span>기준 항속거리 (nm)</span><span id="es-range-base">3,265</span>
-          </div>
-          <div class="eff-sum-row">
-            <span>설계 항속거리 (nm)</span><span id="es-range-design" class="accent">3,265</span>
-          </div>
-          <div class="eff-sum-row">
-            <span>연료 소모율 (kg/nm)</span><span id="es-fuel-rate">9.82</span>
-          </div>
-          <div class="eff-sum-row">
-            <span>순항 추력 (kN)</span><span id="es-thrust">54.2</span>
-          </div>
+          <div class="eff-sum-row"><span>기준 항속거리 (nm)</span><span id="es-range-base">3,265</span></div>
+          <div class="eff-sum-row"><span>설계 항속거리 (nm)</span><span id="es-range-design" class="accent">3,265</span></div>
+          <div class="eff-sum-row"><span>연료 소모율 (kg/nm)</span><span id="es-fuel-rate">9.82</span></div>
+          <div class="eff-sum-row"><span>순항 추력 (kN)</span><span id="es-thrust">54.2</span></div>
         </div>
       </section>
 
@@ -312,7 +354,6 @@
           <span id="sim-progress-text">초기화 중...</span>
         </div>
       </div>
-
     </aside>
   </div>
 
@@ -325,7 +366,8 @@
       </div>
       <div class="modal-body" id="modal-body"></div>
       <div class="modal-footer">
-        <button id="btn-print-report" class="run-btn">🖨 인쇄 / PDF 저장</button>
+        <!-- ★ PDF 저장만 (인쇄 제거) -->
+        <button id="btn-pdf-report" class="run-btn">📄 PDF로 저장</button>
         <button id="btn-copy-report" class="hdr-btn">📋 클립보드 복사</button>
       </div>
     </div>
@@ -333,6 +375,9 @@
 
   <!-- Scripts -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- ★ html2canvas + jsPDF (PDF 저장용) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="aircraft.js"></script>
   <script src="cfd.js"></script>
   <script src="ui.js"></script>
