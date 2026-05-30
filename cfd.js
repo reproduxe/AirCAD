@@ -72,6 +72,7 @@
       aoa, airspeed, altitude, mach,
       span, chord, sweep, twist, thickness, camber, dihedral,
       flap, aileron, spoiler, elevator, rudder,
+      slat, slatSpan, krueger,
       crosswind, turbulence, windshear, precip, icing,
       hasWinglet, hasVortex, hasFence, hasSharklet, hasRiblet, hasLaminar
     } = params;
@@ -95,6 +96,16 @@
     CL += 2 * Math.PI * camber / 100 * 0.9;
     CL += 0.85 * 2 * Math.PI * 0.35 * flap * Math.PI / 180;
     CL += aileron * 0.002 + elevator * 0.003;
+
+    // ★ 슬랫 양력 기여: 슬랫은 앞전 캠버를 증가시켜 CLmax와 실속 받음각을 높임
+    // 슬랫 전개 시 유효 캠버 증가 → CL 상승, 특히 고받음각에서 효과적
+    const slatVal     = slat     || 0;
+    const slatSpanVal = slatSpan || 100;
+    const kruegerVal  = krueger  || 0;
+    const slatFrac    = (slatVal / 27) * (slatSpanVal / 100);
+    const CL_slat     = slatFrac * 0.55;   // 최대 +0.55 기여
+    const CL_krueger  = (kruegerVal / 90) * 0.18; // 크루거: 내측 소형, 기여 적음
+    CL += CL_slat + CL_krueger;
     CL *= (1 - spoiler / 60 * 0.18);
     CL *= (1 - windshear / 30 * 0.05 - icing / 3 * 0.12 - precip / 5 * 0.03);
 
@@ -111,7 +122,9 @@
 
     const M_dd = 0.72 + 0.1 * (1 - Math.cos(sweepRad)) - thickness / 100 * 0.4;
     const CDw  = M > M_dd ? 20 * Math.pow(M - M_dd, 4) : 0;
-    const CD   = CD0 + CDi + CDw + spoiler / 60 * 0.035 + flap / 40 * 0.025 + icing / 3 * 0.025 + precip / 5 * 0.008;
+    const CD   = CD0 + CDi + CDw + spoiler / 60 * 0.035 + flap / 40 * 0.025 + icing / 3 * 0.025 + precip / 5 * 0.008
+               + slatFrac * 0.008   // ★ 슬랫 전개 시 항력 증가
+               + (kruegerVal / 90) * 0.005; // ★ 크루거 플랩 항력
     const LD   = CL / Math.max(CD, 0.001);
 
     // CM
@@ -127,7 +140,10 @@
     const D = q * S * CD;
     const thrust = D + W * Math.tan(aoa * Math.PI / 180) * 0.1;
 
-    const CL_max = 1.5 + flap / 40 * 0.8 - icing / 3 * 0.3;
+    // ★ CLmax: 슬랫 전개 시 실속 받음각 연장 → CLmax 대폭 향상
+    const CL_max = 1.5 + flap / 40 * 0.8 - icing / 3 * 0.3
+                 + slatFrac * 0.70   // 슬랫: 실속 여유 크게 향상
+                 + (kruegerVal / 90) * 0.20; // 크루거
     const stallMargin = (CL_max - CL) / CL_max;
 
     return {
