@@ -298,13 +298,17 @@
      WING STATE
   ═══════════════════════════════════════ */
   let wingGroup = null;
-  let engineGroup = null;           // [BUG FIX] 엔진 그룹도 추적
+  let engineGroup = null;
   let leftWingMesh, rightWingMesh;
   let leftFlap, rightFlap, leftAileron, rightAileron;
   let leftSpoilers = [], rightSpoilers = [];
   let leftWinglet, rightWinglet;
   let leftVortexGens = [], rightVortexGens = [];
   let leftWingFence, rightWingFence;
+  // ★ 슬랫(Slat) 메시 목록
+  let leftSlats = [], rightSlats = [];
+  // ★ 크루거 플랩(Krueger Flap)
+  let leftKrueger, rightKrueger;
 
   function buildWings(params) {
     // [BUG FIX] 이전 wingGroup & engineGroup 모두 제거
@@ -412,6 +416,61 @@
     rightWingFence = leftWingFence.clone();
     rightWingFence.position.z = params.span * 0.4;
     wingGroup.add(rightWingFence);
+
+    // ── ★ SLATS (앞전 고양력 장치) ──
+    // B737-800: 8개 슬랫 패널, 앞전 전체 스팬에 걸쳐 분포
+    // 각 슬랫: 익현 약 15%, 두께 얇음, 앞전에서 약간 앞으로 전개
+    const matSlat = new THREE.MeshStandardMaterial({ color: 0x8aaabb, metalness: 0.6, roughness: 0.35 });
+    const nSlats = 8;
+    leftSlats = []; rightSlats = [];
+    for (let si = 0; si < nSlats; si++) {
+      // 슬랫 위치: 스팬 방향 분포 (안쪽 20% ~ 95%)
+      const etaStart = 0.08 + si * (0.87 / nSlats);
+      const etaMid   = etaStart + (0.87 / nSlats) * 0.5;
+      const etaEnd   = etaStart + (0.87 / nSlats);
+      const slatSpanW = (params.span / 2) * (0.87 / nSlats) * 0.9;
+      const zMid  = params.span / 2 * etaMid;
+
+      // 스팬 방향 위치에 따른 x(후퇴), y(상반각) 오프셋
+      const xOff = 2 + Math.tan(params.sweep * Math.PI / 180) * zMid;
+      const yOff = -0.8 + Math.tan(params.dihedral * Math.PI / 180) * zMid;
+
+      // 익현 방향: 앞전 위치 계산 (루트에서 팁으로 가며 줄어드는 익현)
+      const chordLocal = params.rootChord * (1 - etaMid * (1 - params.tipChord / params.rootChord));
+      const slatChord  = chordLocal * 0.14; // 슬랫은 익현의 약 14%
+      const slatThick  = Math.max(0.06, chordLocal * 0.018);
+
+      // 슬랫 전개 시 앞전에서 앞쪽 아래로 이동하는 형태
+      const slatGeom = new THREE.BoxGeometry(slatChord, slatThick, slatSpanW);
+
+      // 슬랫 홈(slot) — 사실감을 위해 살짝 더 얇고 앞쪽에 위치
+      const lSlat = new THREE.Mesh(slatGeom, matSlat.clone());
+      // 앞전 기준 위치: xOff - rootChord/4 가 날개 앞전의 대략적인 x
+      const leX = xOff - chordLocal * 0.25 - slatChord * 0.5;
+      lSlat.position.set(leX, yOff + slatThick * 0.5, -zMid);
+      leftSlats.push(lSlat);
+      wingGroup.add(lSlat);
+
+      const rSlat = new THREE.Mesh(slatGeom, matSlat.clone());
+      rSlat.position.set(leX, yOff + slatThick * 0.5, zMid);
+      rightSlats.push(rSlat);
+      wingGroup.add(rSlat);
+    }
+
+    // ── ★ KRUEGER FLAP (앞전 크루거 플랩 — 내측) ──
+    const matKrueger = new THREE.MeshStandardMaterial({ color: 0x6a8899, metalness: 0.55, roughness: 0.4 });
+    const kruegerChord = params.rootChord * 0.12;
+    const kruegerSpanW = params.span * 0.12; // 내측 12% 스팬
+    const kruegerGeom  = new THREE.BoxGeometry(kruegerChord, 0.06, kruegerSpanW);
+    const kruegerLeX   = 2 - params.rootChord * 0.25 - kruegerChord * 0.5;
+
+    leftKrueger = new THREE.Mesh(kruegerGeom, matKrueger.clone());
+    leftKrueger.position.set(kruegerLeX, -0.82, -(params.span * 0.06));
+    wingGroup.add(leftKrueger);
+
+    rightKrueger = new THREE.Mesh(kruegerGeom, matKrueger.clone());
+    rightKrueger.position.set(kruegerLeX, -0.82, params.span * 0.06);
+    wingGroup.add(rightKrueger);
 
     aircraftGroup.add(wingGroup);
     updateAddonVisibility();   // 체크박스 상태 즉시 반영
@@ -596,6 +655,45 @@
     if (rudder) rudder.rotation.y = r(rudderDeg) * 0.5;
   }
 
+  // ★ 슬랫 전개 애니메이션
+  // slatDeg: 0(수납)~27(최대 전개), slatSpanPct: 전개 구간 비율(%)
+  // kruegerDeg: 크루거 플랩 각도(0~90)
+  function applySlats(slatDeg, slatSpanPct, kruegerDeg) {
+    const r = d => d * Math.PI / 180;
+    const deployFraction = slatDeg / 27; // 0~1 정규화
+
+    // 슬랫 전개: 앞쪽으로 밀려 나오며 아래로 회전
+    // 전개 시 y 방향 하향 이동 + x 방향 전방 이동 + 회전
+    const nActive = Math.round(leftSlats.length * (slatSpanPct / 100));
+
+    leftSlats.forEach((sl, i) => {
+      if (i < nActive) {
+        // 전개: 앞전에서 앞아래로 미끄러져 나옴
+        sl.position.y -= sl.userData._baseY !== undefined
+          ? 0 : 0; // 위치 리셋은 buildWings에서 이루어짐
+        sl.rotation.z = -r(slatDeg) * 0.7;  // 아래로 드롭
+        // 앞쪽 이동 표현 (translation은 position으로)
+        sl.userData._slatDeploy = deployFraction;
+      } else {
+        sl.rotation.z = 0;
+        sl.userData._slatDeploy = 0;
+      }
+    });
+    rightSlats.forEach((sl, i) => {
+      if (i < nActive) {
+        sl.rotation.z = -r(slatDeg) * 0.7;
+        sl.userData._slatDeploy = deployFraction;
+      } else {
+        sl.rotation.z = 0;
+        sl.userData._slatDeploy = 0;
+      }
+    });
+
+    // 크루거 플랩: 아래쪽으로 펼쳐짐
+    if (leftKrueger)  leftKrueger.rotation.z  =  r(kruegerDeg) * 0.6;
+    if (rightKrueger) rightKrueger.rotation.z = -r(kruegerDeg) * 0.6;
+  }
+
   /* ═══════════════════════════════════════
      WING REBUILD FROM UI
   ═══════════════════════════════════════ */
@@ -697,6 +795,7 @@
   window._aircraft = {
     scene, camera, renderer, aircraftGroup,
     applyControlSurfaces,
+    applySlats,
     applyWingFlex,
     rebuildWingsFromUI,
     setView,
