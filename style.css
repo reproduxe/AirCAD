@@ -387,3 +387,66 @@ input[type=range]::-webkit-slider-thumb:hover {
 
 /* selection */
 ::selection { background: rgba(0,200,255,0.2); }
+
+/* ══════════════════════════════════════
+   ★ ECON SPEED SECTION
+══════════════════════════════════════ */
+.econ-section {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.econ-cost-row {
+  margin-bottom: 10px;
+}
+.econ-label {
+  font-size: 11px; color: var(--text-sec);
+  display: block; margin-bottom: 4px;
+}
+.econ-hint {
+  display: block;
+  font-size: 9px; color: var(--text-dim);
+  font-style: italic; margin-top: 1px;
+}
+.econ-ci-wrap {
+  display: flex; align-items: center; gap: 8px;
+}
+.econ-ci-wrap input[type=range] { flex: 1; }
+.econ-ci-val {
+  font-family: var(--font-mono); color: var(--accent);
+  font-size: 13px; min-width: 28px; text-align: right;
+}
+
+.econ-result-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 5px; margin-top: 6px;
+}
+.econ-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 5px; padding: 6px 8px;
+}
+.econ-card.accent-card {
+  border-color: var(--accent);
+  background: rgba(0,200,255,0.06);
+}
+.econ-card-label {
+  font-size: 9px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.econ-card-value {
+  font-family: var(--font-mono); font-size: 15px;
+  color: var(--text-pri); margin-top: 2px;
+}
+.econ-card.accent-card .econ-card-value { color: var(--accent); }
+
+.econ-chart-label {
+  font-size: 9px; color: var(--text-dim); text-align: center;
+  margin-top: 3px; letter-spacing: 0.3px;
+}
+
+/* ══════════════════════════════════════
+   ★ SLAT SECTION — section-label 색상 구분
+══════════════════════════════════════ */
+.ctrl-section:has(#slat) .section-label {
+  color: var(--accent2);
+}
