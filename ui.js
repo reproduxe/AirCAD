@@ -45,11 +45,17 @@
     { id: 'bending',      valId: 'val-bending',     dec: 0 },
     { id: 'elasticity',   valId: 'val-elasticity',  dec: 0 },
     { id: 'wingtip-flex', valId: 'val-wingtip-flex',dec: 1 },
+    // ★ 슬랫
+    { id: 'slat',         valId: 'val-slat',        dec: 0 },
+    { id: 'slat-span',    valId: 'val-slat-span',   dec: 0 },
+    { id: 'krueger',      valId: 'val-krueger',      dec: 0 },
+    // 조종면
     { id: 'flap',         valId: 'val-flap',        dec: 0 },
     { id: 'aileron',      valId: 'val-aileron',     dec: 0 },
     { id: 'spoiler',      valId: 'val-spoiler',     dec: 0 },
     { id: 'elevator',     valId: 'val-elevator',    dec: 0 },
     { id: 'rudder',       valId: 'val-rudder',      dec: 0 },
+    // 기상
     { id: 'altitude',     valId: 'val-altitude',    dec: 0 },
     { id: 'airspeed',     valId: 'val-airspeed',    dec: 0 },
     { id: 'aoa',          valId: 'val-aoa',         dec: 1 },
@@ -59,6 +65,8 @@
     { id: 'temp-dev',     valId: 'val-temp-dev',    dec: 0 },
     { id: 'precip',       valId: 'val-precip',      dec: 0 },
     { id: 'icing',        valId: 'val-icing',       dec: 0 },
+    // ★ Cost Index
+    { id: 'cost-index',   valId: 'val-cost-index',  dec: 0 },
   ];
 
   /* ═══════════════════════════════════════
@@ -91,6 +99,11 @@
       bending:    v('bending'),
       elasticity: v('elasticity'),
       wingtipFlex: v('wingtip-flex'),
+      // ★ 슬랫
+      slat:       v('slat'),
+      slatSpan:   v('slat-span'),
+      krueger:    v('krueger'),
+      // 조종면
       flap:       v('flap'),
       aileron:    v('aileron'),
       spoiler:    v('spoiler'),
@@ -106,6 +119,7 @@
       tempDev:    v('temp-dev'),
       precip:     v('precip'),
       icing:      v('icing'),
+      costIndex:  v('cost-index'),
       hasWinglet:  c('addon-winglet'),
       hasVortex:   c('addon-vortex'),
       hasFence:    c('addon-fence'),
@@ -210,6 +224,8 @@
 
     // 3D 조종면 & 날개 휨
     window._aircraft.applyControlSurfaces(params.flap, params.aileron, params.spoiler, params.elevator, params.rudder);
+    // ★ 슬랫 전개 반영
+    window._aircraft.applySlats(params.slat, params.slatSpan, params.krueger);
     window._aircraft.applyWingFlex(params.wingtipFlex);
 
     // 날개 형상 재빌드 (geometry 변경 시 debounce)
@@ -223,11 +239,273 @@
     updateReadouts(result.aeroResult);
     updateEfficiency(result.efficiency);
     updateWarnings(result.warnings);
+
+    // ★ Econ Speed 갱신
+    updateEconSpeed(params, result.aeroResult);
   }
 
   /* ═══════════════════════════════════════
-     MAIN INIT (aircraft + cfd 준비 완료 후)
+     ★ ECON SPEED (경제 속도)
+     Cost Index (CI): 0=연료 최소 / 100=시간 최소
+     총 비용 C(V) = 연료 비용(V) + 시간 비용(V)
+     연료 비용: F(V) ∝ CD(V)/CL(V) × V²  (추력 ≈ D)
+     시간 비용: T(V) = CI_cost / V
+     Econ Speed: dC/dV = 0 해당 속도
   ═══════════════════════════════════════ */
+  function updateEconSpeed(params, aeroResult) {
+    const ci = params.costIndex || 0;  // 0~100
+
+    // 비용 계수 (달러 기준, 실제 항공사 CI 스케일 근사)
+    // B737-800 기준:
+    //   연료 단가: ~0.70 $/kg, 순항 연료 흐름: ~2400 kg/hr
+    //   시간 비용(CI=100 기준): ~3000 $/hr
+    const fuelPrice_per_kg = 0.70;          // $/kg
+    const baseFuelFlow_kg_hr = 2400;        // kg/hr at cruise
+    const maxTimeCost_per_hr = 3000;        // $/hr (CI=100)
+    const timeCostRate = (ci / 100) * maxTimeCost_per_hr; // $/hr (시간 비용 계수)
+
+    const altM = params.altitude * 0.3048;
+    const T    = Math.max(216.65, 288.15 - 0.0065 * altM);
+    const pRatio = Math.pow(T / 288.15, 5.256);
+    const rho  = 1.225 * pRatio * (288.15 / T);
+    const a    = Math.sqrt(1.4 * 287 * T);           // 음속 m/s
+    const S    = params.span * params.chord * 0.6;   // 날개 면적 m²
+    const W    = 79000 * 9.81;                        // 무게 N (B737-800 중간 중량)
+
+    // 속도 범위: 200kt ~ 560kt
+    const speeds_kt = [];
+    const totalCosts = [];
+    const fuelCosts  = [];
+    const timeCosts  = [];
+
+    let minCost = Infinity, econSpeedKt = 300;
+    let econFuelCost = 0, econTimeCost = 0, econTotalCost = 0;
+
+    for (let Vkt = 200; Vkt <= 560; Vkt += 5) {
+      const Vms  = Vkt * 0.5144;
+      const M    = Vms / a;
+      const beta = Math.sqrt(Math.max(0.01, 1 - M * M));
+      const sweepRad = params.sweep * Math.PI / 180;
+      const AR   = params.span * params.span / Math.max(S, 1);
+
+      // 해당 속도에서의 CL (수평 비행 유지)
+      const q    = 0.5 * rho * Vms * Vms;
+      const CL_v = W / (q * S);  // 수평 비행: L = W
+
+      // CD 추정 (날개 형상 기반)
+      let e = 0.82;
+      if (params.hasWinglet || params.hasSharklet) e += 0.06;
+      const CDi_v = CL_v * CL_v / (Math.PI * AR * e);
+      let CD0_v = 0.020 + params.thickness / 100 * 0.03 + params.camber / 100 * 0.004;
+      if (params.hasRiblet)  CD0_v *= 0.93;
+      if (params.hasLaminar) CD0_v *= 0.88;
+      const M_dd = 0.72 + 0.1 * (1 - Math.cos(sweepRad)) - params.thickness / 100 * 0.4;
+      const CDw_v = M > M_dd ? 20 * Math.pow(M - M_dd, 4) : 0;
+      const CD_v  = CD0_v + CDi_v + CDw_v;
+
+      // 추력 = 항력 (수평 등속 비행)
+      const D_v = q * S * CD_v;  // N
+
+      // 연료 흐름: F ∝ Thrust × TSFC
+      // TSFC (CFM56): ~0.55 kg/(N·hr) at cruise (≈ 1.53e-4 kg/(N·s))
+      const TSFC = 1.53e-4;  // kg/(N·s)
+      const fuelFlow_kg_s = D_v * TSFC;          // kg/s
+      const fuelFlow_kg_hr = fuelFlow_kg_s * 3600; // kg/hr
+
+      const fuelCost_hr  = fuelFlow_kg_hr * fuelPrice_per_kg; // $/hr
+      const timeCost_hr  = timeCostRate;                       // $/hr (일정)
+      const totalCost_hr = fuelCost_hr + timeCost_hr;          // $/hr
+
+      speeds_kt.push(Vkt);
+      totalCosts.push(totalCost_hr);
+      fuelCosts.push(fuelCost_hr);
+      timeCosts.push(timeCost_hr);
+
+      if (totalCost_hr < minCost) {
+        minCost        = totalCost_hr;
+        econSpeedKt    = Vkt;
+        econFuelCost   = fuelCost_hr;
+        econTimeCost   = timeCost_hr;
+        econTotalCost  = totalCost_hr;
+      }
+    }
+
+    // ── DOM 업데이트 ──
+    const currentKt  = params.airspeed;
+    const deltaKt    = Math.round(econSpeedKt - currentKt);
+    const deltaSign  = deltaKt >= 0 ? '+' : '';
+
+    function setEl(id, val) { const e = document.getElementById(id); if (e) e.textContent = val; }
+    setEl('econ-speed',      econSpeedKt + ' kt');
+    setEl('econ-current',    currentKt + ' kt');
+    setEl('econ-delta',      deltaSign + deltaKt + ' kt');
+    setEl('econ-total-cost', Math.round(econTotalCost).toLocaleString() + ' $/hr');
+    setEl('econ-fuel-cost',  Math.round(econFuelCost).toLocaleString()  + ' $/hr');
+    setEl('econ-time-cost',  Math.round(econTimeCost).toLocaleString()  + ' $/hr');
+
+    const deltaEl = document.getElementById('econ-delta');
+    if (deltaEl) {
+      if (Math.abs(deltaKt) <= 10) deltaEl.style.color = 'var(--accent2)';
+      else if (deltaKt > 0)        deltaEl.style.color = 'var(--warn)';
+      else                         deltaEl.style.color = 'var(--danger)';
+    }
+
+    // ── 비용 곡선 캔버스 차트 ──
+    drawEconChart(speeds_kt, totalCosts, fuelCosts, timeCosts, econSpeedKt, currentKt);
+  }
+
+  /* ── Econ Chart (Canvas 2D) ── */
+  function drawEconChart(speeds, totals, fuels, times, econSpd, currentSpd) {
+    const canvas = document.getElementById('econ-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const pad = { l: 36, r: 12, t: 8, b: 22 };
+    const cW  = W - pad.l - pad.r;
+    const cH  = H - pad.t - pad.b;
+
+    const minSpd = speeds[0], maxSpd = speeds[speeds.length - 1];
+    const maxCost = Math.max(...totals) * 1.08;
+    const minCost = Math.min(...fuels) * 0.9;
+
+    function toX(v)  { return pad.l + (v - minSpd) / (maxSpd - minSpd) * cW; }
+    function toY(c)  { return pad.t + cH - (c - minCost) / (maxCost - minCost) * cH; }
+
+    // 배경 그리드
+    ctx.strokeStyle = '#1a2d42';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = pad.t + (cH / 4) * i;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    }
+
+    // 연료 비용 곡선 (파란색 점선)
+    ctx.strokeStyle = '#0066cc'; ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    speeds.forEach((v, i) => { i === 0 ? ctx.moveTo(toX(v), toY(fuels[i])) : ctx.lineTo(toX(v), toY(fuels[i])); });
+    ctx.stroke(); ctx.setLineDash([]);
+
+    // 총 비용 곡선 (밝은 흰색)
+    ctx.strokeStyle = '#8bbcdd'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    speeds.forEach((v, i) => { i === 0 ? ctx.moveTo(toX(v), toY(totals[i])) : ctx.lineTo(toX(v), toY(totals[i])); });
+    ctx.stroke();
+
+    // Econ 속도 마커 (별 ★)
+    const ex = toX(econSpd), ey = toY(totals[speeds.indexOf(econSpd)] || totals[Math.round(speeds.length/2)]);
+    ctx.fillStyle = '#00c8ff';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('★', ex - 5, ey - 4);
+
+    // 현재 속도 마커 (삼각형 ▲)
+    const cx2 = toX(currentSpd);
+    const cIdx = speeds.findIndex(s => s >= currentSpd);
+    const cy2  = cIdx >= 0 ? toY(totals[cIdx]) : toY(totals[0]);
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillText('▲', cx2 - 5, cy2 - 4);
+
+    // X축 레이블
+    ctx.fillStyle = '#4a6880'; ctx.font = '9px sans-serif';
+    [200, 300, 400, 500].forEach(v => {
+      ctx.fillText(v, toX(v) - 8, H - 4);
+    });
+    // Y축 레이블
+    ctx.fillStyle = '#4a6880';
+    ctx.fillText(Math.round(maxCost / 1000) + 'k', 2, pad.t + 8);
+    ctx.fillText(Math.round(minCost / 1000) + 'k', 2, pad.t + cH);
+  }
+
+  /* ═══════════════════════════════════════
+     ★ PDF 저장 (html2canvas + jsPDF)
+  ═══════════════════════════════════════ */
+  async function saveReportAsPDF() {
+    const modalBody = document.getElementById('modal-body');
+    const btn = document.getElementById('btn-pdf-report');
+    if (!modalBody || !btn) return;
+
+    // 버튼 로딩 상태
+    const origText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '⏳ PDF 생성 중...';
+
+    try {
+      // 보고서 영역 캡처 (html2canvas)
+      const canvas = await html2canvas(modalBody, {
+        scale: 2,                    // 고해상도
+        backgroundColor: '#080e16', // 패널 배경색
+        useCORS: true,
+        logging: false,
+      });
+
+      const imgData = canvas.toDataURL('image/png');
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4',
+      });
+
+      const pdfW = pdf.internal.pageSize.getWidth();
+      const pdfH = pdf.internal.pageSize.getHeight();
+      const margin = 10; // mm
+
+      // 이미지 비율 계산
+      const imgW = canvas.width;
+      const imgH = canvas.height;
+      const ratio = (pdfW - margin * 2) / imgW;
+      const scaledH = imgH * ratio;
+      const pageContentH = pdfH - margin * 2;
+
+      // 페이지 나눔 처리 (긴 보고서 대비)
+      let yOffset = 0;
+      let page = 0;
+      while (yOffset < scaledH) {
+        if (page > 0) pdf.addPage();
+
+        // 헤더 (1페이지만)
+        if (page === 0) {
+          pdf.setFontSize(14);
+          pdf.setTextColor(0, 200, 255);
+          pdf.text('AeroSim CFD — B737 Wing Design Studio', margin, margin - 2);
+          pdf.setFontSize(8);
+          pdf.setTextColor(100, 140, 170);
+          pdf.text('생성: ' + new Date().toLocaleString('ko-KR'), margin, margin + 3);
+        }
+
+        // 이미지 클리핑 — 현재 페이지에 해당하는 영역
+        const srcY    = yOffset / ratio;
+        const srcH    = Math.min(pageContentH / ratio, imgH - srcY);
+        const destH   = srcH * ratio;
+        const topY    = page === 0 ? margin + 7 : margin;
+
+        // 임시 캔버스로 슬라이스
+        const sliceCanvas = document.createElement('canvas');
+        sliceCanvas.width  = imgW;
+        sliceCanvas.height = Math.ceil(srcH);
+        const sliceCtx = sliceCanvas.getContext('2d');
+        sliceCtx.drawImage(canvas, 0, -srcY);
+
+        const sliceData = sliceCanvas.toDataURL('image/png');
+        pdf.addImage(sliceData, 'PNG', margin, topY, pdfW - margin * 2, Math.min(destH, pdfH - topY - margin));
+
+        yOffset += pageContentH;
+        page++;
+      }
+
+      // 날짜 기반 파일명
+      const dateStr = new Date().toISOString().slice(0, 10);
+      pdf.save(`AeroSim_CFD_Report_${dateStr}.pdf`);
+
+    } catch (err) {
+      console.error('PDF 생성 오류:', err);
+      alert('PDF 생성에 실패했습니다.\n' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = origText;
+    }
+  }
   function initUI() {
 
     // ── 슬라이더 이벤트 ──
@@ -314,10 +592,10 @@
 
     // ── 비행 단계 프리셋 ──
     const phasePresets = {
-      taxi:    { altitude: 0,     airspeed: 20,  aoa: 0,  flap: 0,  spoiler: 0 },
-      takeoff: { altitude: 1000,  airspeed: 180, aoa: 10, flap: 15, spoiler: 0 },
-      cruise:  { altitude: 35000, airspeed: 450, aoa: 4,  flap: 0,  spoiler: 0 },
-      landing: { altitude: 1000,  airspeed: 140, aoa: 8,  flap: 30, spoiler: 20 },
+      taxi:    { altitude: 0,     airspeed: 20,  aoa: 0,  flap: 0,  spoiler: 0, slat: 0,  krueger: 0  },
+      takeoff: { altitude: 1000,  airspeed: 180, aoa: 10, flap: 15, spoiler: 0, slat: 22, krueger: 45 },
+      cruise:  { altitude: 35000, airspeed: 450, aoa: 4,  flap: 0,  spoiler: 0, slat: 0,  krueger: 0  },
+      landing: { altitude: 1000,  airspeed: 140, aoa: 8,  flap: 30, spoiler: 20, slat: 27, krueger: 60 },
     };
 
     document.querySelectorAll('.phase-btn').forEach(btn => {
@@ -355,6 +633,9 @@
     });
     const printBtn = document.getElementById('btn-print-report');
     if (printBtn) printBtn.addEventListener('click', () => window.print());
+    // ★ PDF 저장 버튼 (인쇄 대신)
+    const pdfBtn = document.getElementById('btn-pdf-report');
+    if (pdfBtn) pdfBtn.addEventListener('click', saveReportAsPDF);
     const copyBtn = document.getElementById('btn-copy-report');
     if (copyBtn) copyBtn.addEventListener('click', () => {
       const text = document.getElementById('modal-body').innerText;
@@ -432,6 +713,46 @@
     );
   }
 
+  /* ── 보고서용 Econ Speed 계산 (UI 없이 값만 반환) ── */
+  function calcEconForReport(params) {
+    const ci = params.costIndex || 0;
+    const fuelPrice = 0.70, maxTimeCost = 3000;
+    const timeCostRate = (ci / 100) * maxTimeCost;
+    const altM = params.altitude * 0.3048;
+    const T    = Math.max(216.65, 288.15 - 0.0065 * altM);
+    const rho  = 1.225 * Math.pow(T / 288.15, 5.256) * (288.15 / T);
+    const a    = Math.sqrt(1.4 * 287 * T);
+    const S    = params.span * params.chord * 0.6;
+    const W    = 79000 * 9.81;
+    const AR   = params.span * params.span / Math.max(S, 1);
+    const sweepRad = params.sweep * Math.PI / 180;
+    let e = 0.82; if (params.hasWinglet || params.hasSharklet) e += 0.06;
+    let CD0_base = 0.020 + params.thickness / 100 * 0.03 + params.camber / 100 * 0.004;
+    if (params.hasRiblet)  CD0_base *= 0.93;
+    if (params.hasLaminar) CD0_base *= 0.88;
+    const M_dd = 0.72 + 0.1 * (1 - Math.cos(sweepRad)) - params.thickness / 100 * 0.4;
+
+    let minCost = Infinity, econSpeedKt = 300, minFuel = 0, minTime = 0;
+    let currentTotalCost = 0;
+
+    for (let Vkt = 200; Vkt <= 560; Vkt += 5) {
+      const Vms = Vkt * 0.5144, M = Vms / a;
+      const q   = 0.5 * rho * Vms * Vms;
+      const CL_v = W / Math.max(q * S, 0.001);
+      const CDi_v = CL_v * CL_v / (Math.PI * AR * e);
+      const CDw_v = M > M_dd ? 20 * Math.pow(M - M_dd, 4) : 0;
+      const CD_v  = CD0_base + CDi_v + CDw_v;
+      const D_v   = q * S * CD_v;
+      const fuelFlow = D_v * 1.53e-4 * 3600 * fuelPrice;
+      const total = fuelFlow + timeCostRate;
+      if (total < minCost) { minCost = total; econSpeedKt = Vkt; minFuel = fuelFlow; minTime = timeCostRate; }
+      if (Vkt === params.airspeed || (Vkt - 5 < params.airspeed && params.airspeed <= Vkt)) {
+        currentTotalCost = total;
+      }
+    }
+    return { econSpeedKt, minCost, minFuel, minTime, currentTotalCost };
+  }
+
   /* ═══════════════════════════════════════
      REPORT GENERATION
   ═══════════════════════════════════════ */
@@ -450,6 +771,9 @@
     if (params.hasSharklet) addons.push('샤클렛');
     if (params.hasRiblet)   addons.push('리블렛 코팅');
     if (params.hasLaminar)  addons.push('층류 제어');
+
+    // 보고서용 Econ Speed 계산
+    const econForReport = calcEconForReport(params);
 
     const warnHTML = Object.values(warnings).map(w => {
       const clr = w.level === 'ok' ? '#00ff9d' : w.level === 'warn' ? '#ffcc00' : '#ff3b3b';
@@ -479,7 +803,15 @@
   <tr><td>날개 끝 휨량</td><td>${params.wingtipFlex}</td><td>m</td></tr>
 </table>
 
-<h2>2. 조종면 편향 상태</h2>
+<h2>2. 고양력 장치 (앞전) 상태</h2>
+<table>
+  <tr><th>장치</th><th>편향각 / 상태</th><th>비고</th></tr>
+  <tr><td>슬랫 (Slat)</td><td>${params.slat}°</td><td>전개 구간 ${params.slatSpan}%</td></tr>
+  <tr><td>크루거 플랩 (Krueger)</td><td>${params.krueger}°</td><td>내측 앞전</td></tr>
+  <tr><td>슬랫 CLmax 기여</td><td>+${((params.slat/27)*(params.slatSpan/100)*0.70).toFixed(2)}</td><td>실속 여유 향상</td></tr>
+</table>
+
+<h2>3. 조종면 편향 상태</h2>
 <table>
   <tr><th>조종면</th><th>편향각</th></tr>
   <tr><td>플랩</td><td>${params.flap}°</td></tr>
@@ -489,7 +821,7 @@
   <tr><td>러더</td><td>${params.rudder}°</td></tr>
 </table>
 
-<h2>3. 비행 조건 및 기상 상태</h2>
+<h2>4. 비행 조건 및 기상 상태</h2>
 <table>
   <tr><th>항목</th><th>값</th></tr>
   <tr><td>비행 고도</td><td>${params.altitude.toLocaleString()} ft</td></tr>
@@ -504,10 +836,10 @@
   <tr><td>기온 편차</td><td>${params.tempDev} °C</td></tr>
 </table>
 
-<h2>4. 부가 장치 구성</h2>
+<h2>5. 부가 장치 구성</h2>
 <p>${addons.length ? addons.join(' | ') : '없음 (기본 구성)'}</p>
 
-<h2>5. CFD 공력 해석 결과</h2>
+<h2>6. CFD 공력 해석 결과</h2>
 <table>
   <tr><th>계수</th><th>값</th><th>비고</th></tr>
   <tr><td>양력계수 CL</td><td>${aeroResult.CL}</td><td>—</td></tr>
@@ -518,7 +850,19 @@
   <tr><td>순항 추력</td><td>${aeroResult.thrust} kN</td><td>—</td></tr>
 </table>
 
-<h2>6. 효율성 비교 분석 (기준 B737-800 대비)</h2>
+<h2>7. ⚡ 경제 속도 (Econ Speed) 분석</h2>
+<table>
+  <tr><th>항목</th><th>값</th><th>비고</th></tr>
+  <tr><td>Cost Index (CI)</td><td>${params.costIndex}</td><td>0=연료절감, 100=시간절감</td></tr>
+  <tr><td>Econ 속도</td><td>${econForReport.econSpeedKt} kt</td><td>총 비용 최소화 속도</td></tr>
+  <tr><td>현재 비행 속도</td><td>${params.airspeed} kt</td><td>—</td></tr>
+  <tr><td>속도 편차</td><td>${econForReport.econSpeedKt - params.airspeed > 0 ? '+' : ''}${econForReport.econSpeedKt - params.airspeed} kt</td><td>양수=속도 증가 권장</td></tr>
+  <tr><td>현재 속도 기준 총 비용</td><td>${Math.round(econForReport.currentTotalCost).toLocaleString()} $/hr</td><td>—</td></tr>
+  <tr><td>Econ 속도 기준 총 비용</td><td>${Math.round(econForReport.minCost).toLocaleString()} $/hr</td><td>—</td></tr>
+  <tr><td>비용 절감 가능액</td><td>${Math.round(econForReport.currentTotalCost - econForReport.minCost).toLocaleString()} $/hr</td><td>—</td></tr>
+</table>
+
+<h2>8. 효율성 비교 분석 (기준 B737-800 대비)</h2>
 <table>
   <tr><th>지표</th><th>기준값</th><th>설계값</th><th>변화율</th></tr>
   <tr>
@@ -539,10 +883,10 @@
   </tr>
 </table>
 
-<h2>7. 안전성 검토</h2>
+<h2>9. 안전성 검토</h2>
 <table><tr><th>항목</th><th>판정</th></tr>${warnHTML}</table>
 
-<h2>8. 종합 평가</h2>
+<h2>10. 종합 평가</h2>
 <p>
   현재 설계의 양항비(L/D = ${aeroResult.LD})는 기준 대비
   <strong style="color:${parseFloat(ldDiff)>=0?'#00ff9d':'#ff3b3b'}">${ldDiff > 0 ? '+':''}${ldDiff}%</strong> 변화입니다.
@@ -550,6 +894,7 @@
     ? `연료 소모를 <strong style="color:#00ff9d">${efficiency.fuelSavingPct}%</strong> 절감하여 친환경성이 향상되었습니다.`
     : `연료 소모가 <strong style="color:#ff3b3b">${Math.abs(parseFloat(efficiency.fuelSavingPct))}%</strong> 증가하였습니다.`}
   ${addons.length ? `부가 장치(${addons.join(', ')})가 공력 성능에 반영되었습니다.` : ''}
+  Econ 속도(${econForReport.econSpeedKt} kt) 기준 운항 시 총 운항 비용 최소화가 가능합니다.
 </p>
 <p style="color:var(--text-sec);font-size:10px;margin-top:12px">
   ※ 본 보고서는 패널법 기반 근사 CFD 결과입니다. 정밀 분석을 위해 RANS/LES 해석을 권장합니다.
